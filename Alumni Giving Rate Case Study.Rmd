@@ -1,0 +1,339 @@
+---
+title: "Alumni Data Case Study"
+author: "Kaitlyn Straight"
+date: "BANA 7052: Applied Linear Regression"
+output: html_document
+---
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(dplyr)
+library(car)
+library(sandwich)
+library(ggplot2)
+library(GGally)
+library(MASS)
+library(broom)
+library(gridExtra)
+library(psych)
+library(leaps)
+library(patchwork)
+library(ggcorrplot)
+```
+
+```{r data loading, echo = FALSE, include = FALSE}
+url <- "https://bgreenwell.github.io/uc-bana7052/data/alumni.csv"
+alumni <- read.csv(url)
+
+# rename cols
+alumni <- alumni %>%  
+  rename("Giving_Rate" = "alumni_giving_rate" ,
+         "Small_Classes" = "percent_of_classes_under_20",
+         "Faculty_Ratio" = "student_faculty_ratio")
+
+# add private labels
+alumni$private <- factor(alumni$private, labels = c("Public", "Private"))
+
+# Ensure private is a factor with correct order
+alumni$private <- factor(alumni$private, levels = c("Public", "Private"))
+
+# Fit the initial multiple linear regression model
+model1 <- lm(Giving_Rate ~ Small_Classes + Faculty_Ratio + private, data = alumni)
+
+# Model summary
+modelsum <- summary(model1)
+```
+
+### Executive Summary 
+
+__Strategic Insight:__ Optimizing Alumni Engagement through Operational Metrics    
+In a study of 48 U.S. universities, student-faculty ratio emerged as the primary driver of alumni giving rates. For every 1-unit decrease in this ratio _(i.e. more faculty per student),_ donation rates __increase by approximately 1.4%.__    
+
+While "Small Classes" and "Private Status" are often highlighted in university marketing, this analysis proves that the direct availability of faculty is a key predictor of long-term alumni loyalty. This report provides a data-driven framework for university leadership to prioritize faculty recruitment as a high-ROI strategy for endowment growth.    
+
+__Decision Support:__ Understanding alumni giving is critical to universities' finances as __donations support scholarships, research, and infrastructure.__ T These findings suggest that to increase long-term endowment growth, universities should prioritize faculty recruitment over infrastructure projects focused on class size. 
+
+
+### Exploratory Data Analysis
+
+Histograms show that _all variables are reasonably symmetric with mild skew._ Private institutions generally exhibit higher giving rates, and there is initial evidence that _Faculty Ratio has a **negative relationship** with Giving Rate._ A __summary of descriptive statistics for key variables follows:__     
+
+| Variable        | Mean  | SD    | Median | Min | Max |
+|-----------------|-------|-------|--------|-----|-----|
+| Giving Rate (%) | 29.27 | 13.44 | 29.0   | 7   | 67  |
+| Small Classes (%) | 55.73 | 13.19 | 59.5 | 29 | 77  |
+| Faculty Ratio   | 11.54 | 4.85  | 10.5   | 3   | 23  |  
+
+
+```{r heatmap}
+# Prepare data for correlation viz
+corr_df <- alumni %>%
+  dplyr::select(Giving_Rate, Small_Classes, Faculty_Ratio, private) %>%
+  mutate(private = as.numeric(private)) 
+
+corr_mat <- cor(corr_df)
+
+# Heatmap viz
+ggcorrplot(corr_mat, 
+           hc.order = TRUE, 
+           type = "lower",
+           lab = TRUE, 
+           colors = c("sienna", "white", "navy"),
+           title = "Predictor Correlation: Analyzing Multicollinearity",
+           ggtheme = theme_minimal())
+```
+
+
+The pairwise matrix indicated moderate correlation among predictors, suggesting __multicollinearity between key variables.__ Statistically significant correlation coefficients __R²__ assert that 64.6% and 74.2% of the variation in _Giving Rate_ is explained by Small Classes and the Student-Faculty Ratio, respectively. 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.width=2.8, fig.height=2.6}
+alumni_long <- alumni %>%
+  dplyr::select(Giving_Rate, Small_Classes, Faculty_Ratio) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Boxplot of private and public
+ggplot(alumni, aes(x = private, y = Giving_Rate, fill = private)) + 
+  geom_boxplot(alpha = 0.7, width = 0.4) +
+  labs(x = "Institution Type", y = "Giving Rate (%)",
+       title = "Giving Rate by Institution Type") +
+  theme_bw() +
+  scale_fill_manual(values = c("Public" = "seagreen", "Private" = "violet"))+
+  theme(legend.position = "none",
+        axis.title = element_text(size = 9),
+        axis.text = element_text(size = 8)) 
+
+ggplot(alumni, aes(x = Faculty_Ratio, y = Giving_Rate, color = private)) +
+  geom_point(size = 1.5, alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_bw() +
+  labs(x = "Faculty Ratio", y = "Giving Rate (%)", 
+       color = "Institution Type",
+       title = "Giving Rate vs Faculty Ratio") +
+  annotate("text", x = 5, y = 65, 
+           label = "Private = violet; Public = seagreen", 
+           hjust = 0, size = 3, color = "gray30") +
+  scale_color_manual(values = c("Public" = "seagreen", "Private" = "violet")) +
+  theme(legend.position = "none",
+        axis.title = element_text(size = 9),
+        axis.text = element_text(size = 7))
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, include = FALSE}
+variablesum = describe(alumni[, c("Giving_Rate", "Small_Classes", "Faculty_Ratio")])
+
+# boxcox
+bc <- boxcox(model1)
+lambda <- bc$x[which.max(bc$y)]
+
+# cooks distance for influential points...
+cooksnums = which(cooks.distance(model1) > 4/length(model1$fitted.values))
+
+# interaction model
+model2 <- lm(Giving_Rate ~ Small_Classes * private + Faculty_Ratio, data = alumni)
+model2sum = summary(model2)
+
+# stepwise model
+step_model = step(model1, direction = "both")
+stepsum = summary(step_model)
+
+# leaps
+subset_fit <- regsubsets(Giving_Rate ~ Small_Classes + Faculty_Ratio + private,
+                         data = alumni, nvmax = 3)
+subsetsum = summary(subset_fit)
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.height = 4, fig.width = 6}
+# Pairwise plot
+ggpairs(alumni, columns = c("Small_Classes", "Faculty_Ratio", "Giving_Rate"),
+mapping = ggplot2::aes(color = private),
+upper = list(continuous = wrap("cor", size = 3)),
+lower = list(continuous = wrap("points", alpha = 0.6, size = 2))) +
+  labs(title = "Pairwise Plot") +
+  scale_color_manual(values = c("Public" = "seagreen", "Private" = "violet")) +
+  scale_fill_manual(values = c("Public" = "seagreen", "Private" = "violet")) +
+  theme_bw()
+```
+
+
+
+# Data Description
+
+The data is structured in csv format, consisting of 48 observations on 5 variables: __*("school", "percent_of_classes_under_20", "student_faculty_ratio", "alumni_giving_rate", "private").*__ These variables capture information from a sample of U.S. universities, including measures of teaching environment and institutional type.
+
+For preliminary analyses, we used a combination of histograms, scatterplots, boxplots, and pairwise plots to __visualize trends and assess distributions and possible relationships between our variables.__ Our plots also highlight differences between private and public universities. 
+
+Results showed __generally normal distributions across variables,__ with a higher giving rate at Private schools. We observed a ___fairly even spread of Residuals,__ with _approximately normal distribution and slight right skew, a normally distributed Q-Q plot,_ and __slight heteroskedasticity in our Scale-Location plot.__  
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.width= 3.2, fig.height=2.5}
+# creation of models etc. moved to top of code
+
+# multicollinearity
+vifvalues <- vif(model1)
+
+# Diagnostic plots
+model_resid <- augment(model1)  # adds .fitted and .resid columns
+
+
+# Residuals vs Fitted
+ggplot(model_resid, aes(x = .fitted, y = .resid)) +
+  geom_point(color = "darkseagreen", size = 2, alpha = 0.7) +
+  geom_hline(yintercept = 0, color = "darkgreen", size = 1) +
+  labs(x = "Fitted Values", y = "Residuals",
+       title = "Residuals vs Fitted Values") +
+  theme_bw(base_size = 10)
+
+# Histogram of residuals
+ggplot(model_resid, aes(x = .resid)) +
+  geom_histogram(aes(y = ..density..), color = "chocolate2", fill = "sienna1", bins = 20, alpha = 0.7) +
+  geom_density(color = "orangered3") +
+  labs(x = "Residuals", y = "Count",
+       title = "Histogram of Residuals") +
+  theme_bw(base_size = 10)
+
+# Scale-Location Plot (sqrt standardized residuals vs fitted)
+model_resid$.std_resid <- rstandard(model1)
+ggplot(model_resid, aes(x = .fitted, y = sqrt(abs(.std_resid)))) +
+  geom_point(color = "skyblue1", size = 2, alpha = 0.6) +
+  geom_smooth(method = "loess", se = FALSE, color = "dodgerblue4") +
+  labs(x = "Fitted Values", y = "Sqrt(|Standardized Residuals|)",
+       title = "Scale-Location Plot") +
+  theme_bw(base_size = 10)
+
+# Q-Q Plot of residuals
+model_diag <- augment(model1)
+ggplot(model_diag, aes(sample = .resid)) +
+  stat_qq(color = "navy", size = 2) + stat_qq_line(color = "lightslateblue") +
+  labs(title = "Normal Q-Q Plot") +
+  theme_bw()
+```
+
+
+
+
+**Model Selection**   
+Based on Box Cox results, we determined that __*a transformation was not necessary.*__ While the optimal  𝜆 was 0.8, the 95% confidence interval included 1.0, allowing us to keep the data in its original scale for better interpretability. We We compared the original model to an alternate model in which we removed the most influential points (21, 33, 37), but _found no meaningful differences,_ suggesting our original model is well-fit. __Selection was guided by AIC, adjusted R², and diagnostic performance,__ and the original model was retained.
+
+
+
+ 
+
+__Variance Inflation Factor (VIF)__  were approximately __3.18 for Small Classes, 3.51 for Faculty Ratio, and 3.60 for Private/Public.__ All predictors' values fall below the threshold of 5, indicating __*no serious multicollinearity*__ between variables. _Note that elevated values for Faculty Ratio and Private Institution suggest some overlap — possibly because private universities tend to have smaller class sizes and lower student-faculty ratios._
+
+__Diagnostics and Transformation__   
+To evaluate the appropriateness of the linear regression model, we examined several diagnostic plots and conducted a Box-Cox transformation analysis.
+  
+- **Residuals vs. Fitted Values:** Fitted residuals were centered around zero with _slight heteroskedasticity_ indicating the _linearity assumption is reasonably met._
+  
+- **Residual Histogram & Q-Q Plot:** The residuals were approximately normal with a slight right skew and small upper-tail deviations. _Normality assumptions are reasonably satisfied._   
+
+- **Scale-Location Plot:** A slight wavy pattern suggests _minor changes in variance,_ but is _unlikely to bias coefficient estimates._ 
+   
+- **Cook’s Distance:** Observations __21, 33, and 37__ showed moderate influence but did not meaningfully affect the model.
+
+- **Box-Cox Transformation:** Suggested __optimal λ = 0.8,__ with a 95% confidence interval __including λ = 1,__ indicating _that the _raw Giving Rate provides an adequate fit and that a transformation of the response variable is not required.__no transformation is needed._
+
+**Conclusion**   
+Diagnostic results and the Box-Cox test confirm that the __linear model assumptions are adequately met,__ so the __Giving Rate is retained on its original scale for interpretability.__
+
+
+## Simulation Study
+
+To address the limitations of the small sample size (n = 48), I conducted a simulation study to determine whether "Private Status" and "Small Classes" were truly insignificant or simply masked by low statistical power. I generated a simulated dataset of __*n = 1000*__ observations, fit a multiple linear regression model, and compared distributions with the original data. 
+
+
+| Predictor        | Original Est. (p-val) | Simulated Est.      | Significance          |
+|------------------|-----------------------|---------------------|-----------------------|
+| Intercept        | 36.78 (0.010)         | 42.59 (<0.001)      | –                     |
+| Small_Classes    | 0.077 (0.668)         | 0.096 __(<0.001)__       | __Became Significant__    |
+| Faculty_Ratio    | -1.398 (0.009)        | -1.39 (<0.001)     | Still Significant     |
+| Private          | 6.285 (0.247)         | -6.86 __(<0.001)__     | __Became Significant__    |
+
+```{r, echo = FALSE, wawrning = FALSE, message = FALSE, fig.height= 4, fig.width=5}
+set.seed(305) 
+
+n <- 1000
+
+sim_data <- data.frame(
+  Small_Classes = rnorm(n, mean = mean(alumni$Small_Classes), sd = sd(alumni$Small_Classes)),
+  Faculty_Ratio = rnorm(n, mean = mean(alumni$Faculty_Ratio), sd = sd(alumni$Faculty_Ratio)),
+  private = factor(sample(c("Public", "Private"), n, replace = TRUE))
+)
+
+# gen response based on original coefficients + se
+sim_data$Giving_Rate <- 36.784 + 
+                        0.077 * sim_data$Small_Classes -
+                        1.398 * sim_data$Faculty_Ratio +
+                        6.285 * ifelse(sim_data$private == "Private", 1, 0) +
+                        rnorm(n, 0, 9)  # same residual SD as original
+
+# Fit regression model on simdata
+sim_model <- lm(Giving_Rate ~ Small_Classes + Faculty_Ratio + private, data = sim_data)
+simsum = summary(sim_model)
+
+# P-Values for Comparison
+orig_p <- summary(model1)$coefficients[,4][-1]
+sim_p <- summary(sim_model)$coefficients[,4][-1]
+
+# combine datasets
+original <- alumni %>% mutate(Dataset = "Original")
+simulated <- sim_data %>% mutate(Dataset = "Simulated")
+combined <- bind_rows(original, simulated)
+
+# Pivot to long for ggplot
+combined_long <- combined %>%
+  pivot_longer(cols = c(Giving_Rate, Small_Classes, Faculty_Ratio),
+               names_to = "Variable", values_to = "Value")
+
+# side-by-side histograms
+sbshist <- ggplot(combined_long, aes(x = Value, fill = Dataset)) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5, bins = 15, position = "identity", color = "white") +
+  geom_density(aes(color = Dataset), fill = NA, size = 1) +
+  facet_wrap(~Variable, scales = "free") +
+  labs(x = NULL, y = "Count", title = "Distribution Comparison: Original vs Simulated") +
+  theme_bw() +
+  scale_fill_manual(values = c("Original" = "lightblue", "Simulated" = "violet")) +
+  scale_color_manual(values = c("Original" = "royalblue", "Simulated" = "mediumorchid")) +
+  theme(axis.title = element_text(size = 9),
+        axis.text = element_text(size = 7),
+        legend.title = element_blank(),
+        legend.position = "none")
+
+# Side-by-side boxplots for each variable
+sbsbox <- ggplot(combined_long, aes(x = Dataset, y = Value, fill = Dataset)) +
+  geom_boxplot(alpha = 0.7) +
+  facet_wrap(~Variable, scales = "free") +
+  labs(x = NULL, y = "Value", title = "Boxplot Comparison: Original vs Simulated") +
+  theme_bw() +
+  scale_fill_manual(values = c("Original" = "lightblue", "Simulated" = "violet")) +
+  theme(axis.title = element_text(size = 9),
+        axis.text = element_text(size = 7),
+        legend.position = "none")
+
+sbshist / sbsbox
+
+```
+
+
+In the simulated dataset __(n = 1000),__ both _Small Classes_ and _Private/Public_ predictors became __statistically significant.__ This illustrated that the limitations and low statistical power of a small sample size were confounding our results.
+
+
+### __Strategic Discussion and Recommendations__
+
+The results of this analysis confirm a clear link between institutional operations and financial support. While the initial sample ($N=48$) suggested only one significant driver, the Simulation Study ($N=1000$) revealed that factors like "Private Status" and "Class Size" were masked by low statistical power.
+
+Strategic Insight: Optimizing Alumni Engagement through Operational Metrics    
+In a study of 48 U.S. universities, student-faculty ratio emerged as the primary driver of alumni giving rates. For every 1-unit decrease in this ratio, donation rates increase by approximately 1.4%.
+
+While "Small Classes" and "Private Status" are often highlighted in university marketing, this analysis proves that the direct availability of faculty is a key predictor of long-term alumni loyalty. This report provides a data-driven framework for university leadership to prioritize faculty recruitment as a high-ROI strategy for endowment growth.
+
+
+__Limitations__ include the _small sample size (n = 48), possible omitted variables_ such as tuition, school rank, and endowment, and a simplified private/public indicator. __Future analyses__ could incorporate additional predictors, cross-validation, and interactions between private status and faculty ratio.
+
+
+# References
+
+- Greenwell, B. (n.d.). Alumni giving data. Retrieved from https://bgreenwell.github.io/uc-bana7052/data/alumni.csv
+
+
+
